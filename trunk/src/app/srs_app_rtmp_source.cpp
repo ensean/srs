@@ -1388,10 +1388,15 @@ srs_error_t SrsOriginHub::create_backend_forwarders(bool &applied)
     for (it = urls.begin(); it != urls.end(); ++it) {
         std::string url = *it;
 
-        // create temp Request by url
+        // Create request from the backend URL.
+        // For services like Amazon IVS, the URL contains the stream key which must be preserved.
+        // Example: rtmp://xxx.global-contribute.live-video.net:443/app/sk_xxx_stream_key
         SrsUniquePtr<ISrsRequest> req(new SrsRequest());
         srs_net_url_parse_rtmp_url(url, req->tcUrl_, req->stream_);
         srs_net_url_parse_tcurl(req->tcUrl_, req->schema_, req->host_, req->vhost_, req->app_, req->stream_, req->port_, req->param_);
+
+        // Copy essential fields from original request that are not in the URL.
+        req->ip_ = req_->ip_;
 
         // create forwarder
         ISrsForwarder *forwarder = new SrsForwarder(this);
@@ -1400,7 +1405,10 @@ srs_error_t SrsOriginHub::create_backend_forwarders(bool &applied)
         std::stringstream forward_server;
         forward_server << req->host_ << ":" << req->port_;
 
-        // initialize the forwarder with request.
+        // Initialize the forwarder with the parsed request from backend URL.
+        // This ensures the forwarder uses the correct app/stream from the backend URL,
+        // not from the original publishing request. This is critical for services like
+        // Amazon IVS where the stream key is part of the URL.
         if ((err = forwarder->initialize(req.get(), forward_server.str())) != srs_success) {
             return srs_error_wrap(err, "init backend forwarder failed, forward-to=%s", forward_server.str().c_str());
         }
@@ -1410,7 +1418,7 @@ srs_error_t SrsOriginHub::create_backend_forwarders(bool &applied)
 
         if ((err = forwarder->on_publish()) != srs_success) {
             return srs_error_wrap(err, "start backend forwarder failed, vhost=%s, app=%s, stream=%s, forward-to=%s",
-                                  req_->vhost_.c_str(), req_->app_.c_str(), req_->stream_.c_str(), forward_server.str().c_str());
+                                  req->vhost_.c_str(), req->app_.c_str(), req->stream_.c_str(), forward_server.str().c_str());
         }
     }
 
