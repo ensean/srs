@@ -48,28 +48,29 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 
 # Configure your forward destinations here
+# Set via environment variable or edit directly
+import os
+
+# Get IVS endpoint from environment variable, or use default test destination
+IVS_ENDPOINT = os.environ.get("IVS_ENDPOINT", "")
+
 FORWARD_DESTINATIONS = {
     # Default destinations for any stream
     "default": [
-        # Example: Forward to another SRS server
+        # Add your destinations here, examples:
         # "rtmp://backup-server:1935/live/backup_stream",
-        
-        # Example: Amazon IVS endpoint (replace with your actual endpoint and stream key)
-        # "rtmp://xxx.global-contribute.live-video.net:443/app/sk_xxx_your_stream_key",
-        
-        # Example: YouTube Live
-        # "rtmp://a.rtmp.youtube.com/live2/your-stream-key",
-        
-        # Example: Twitch
-        # "rtmp://live.twitch.tv/app/your-stream-key",
     ],
     
     # Stream-specific destinations (app/stream -> destinations)
     # "live/important_stream": [
     #     "rtmp://primary:1935/live/main",
-    #     "rtmp://backup:1935/live/backup",
     # ],
 }
+
+# If IVS_ENDPOINT is set, add it to default destinations
+if IVS_ENDPOINT:
+    FORWARD_DESTINATIONS["default"].append(IVS_ENDPOINT)
+    print(f"[Config] Added IVS endpoint: {IVS_ENDPOINT[:50]}...")
 
 
 class ForwardBackendHandler(BaseHTTPRequestHandler):
@@ -136,18 +137,57 @@ class ForwardBackendHandler(BaseHTTPRequestHandler):
             urls = FORWARD_DESTINATIONS.get("default", [])
             print(f"  Using default destinations")
         
-        print(f"  Forward URLs: {urls}")
+        # Fix URLs: ensure Amazon IVS URLs have port 443
+        fixed_urls = []
+        for url in urls:
+            fixed_url = self.fix_ivs_url(url)
+            fixed_urls.append(fixed_url)
+            if fixed_url != url:
+                print(f"  [Fixed] {url} -> {fixed_url}")
+        
+        print(f"  Forward URLs: {fixed_urls}")
         
         # Send response
         response = {
             "code": 0,
             "data": {
-                "urls": urls
+                "urls": fixed_urls
             }
         }
         
         self.send_json_response(200, response)
         print(f"{'='*60}\n")
+    
+    def fix_ivs_url(self, url):
+        """
+        Fix Amazon IVS URL to include port 443.
+        IVS requires port 443 for RTMP ingest.
+        
+        Example:
+            rtmp://xxx.global-contribute.live-video.net/app/sk_xxx
+            -> rtmp://xxx.global-contribute.live-video.net:443/app/sk_xxx
+        """
+        import re
+        
+        # Check if this is an Amazon IVS URL (contains live-video.net)
+        if "live-video.net" not in url:
+            return url
+        
+        # Check if port is already specified
+        # Pattern: rtmp://host:port/path or rtmp://host/path
+        match = re.match(r'^(rtmp://[^/:]+)(:\d+)?(/.*)?$', url)
+        if not match:
+            return url
+        
+        host_part = match.group(1)  # rtmp://xxx.live-video.net
+        port_part = match.group(2)  # :443 or None
+        path_part = match.group(3) or ""  # /app/sk_xxx
+        
+        # If no port specified, add :443 for IVS
+        if not port_part:
+            return f"{host_part}:443{path_part}"
+        
+        return url
     
     def do_GET(self):
         """Handle GET request - for health check"""

@@ -229,9 +229,31 @@ srs_error_t SrsForwarder::do_cycle()
         // parse host:port from hostport.
         srs_net_split_hostport(ep_forward_, server, port);
 
-        // generate url
-        url = srs_net_url_encode_rtmp_url(server, port, req_->host_, req_->vhost_, req_->app_, req_->stream_, req_->param_);
+        // Generate clean RTMP URL for forwarding.
+        // For external services like Amazon IVS, YouTube, Twitch, etc.,
+        // we should NOT append vhost parameter as they don't understand it.
+        // Format: rtmp://server:port/app/stream
+        std::stringstream ss;
+        ss << "rtmp://" << server << ":" << port << "/" << req_->app_ << "/" << req_->stream_;
+        
+        // Only append original params if they exist and don't contain vhost
+        // (vhost is SRS-specific and external services don't understand it)
+        if (!req_->param_.empty()) {
+            std::string param = req_->param_;
+            // Remove vhost from params for external forwarding
+            size_t vhost_pos = param.find("vhost=");
+            if (vhost_pos == std::string::npos) {
+                // No vhost in param, safe to append
+                if (param[0] != '?' && param[0] != '&') {
+                    ss << "?";
+                }
+                ss << param;
+            }
+        }
+        url = ss.str();
     }
+
+    srs_trace("Forwarder: Connecting to %s, app=%s, stream=%s", url.c_str(), req_->app_.c_str(), req_->stream_.c_str());
 
     srs_freep(sdk_);
     srs_utime_t cto = SRS_FORWARDER_CIMS;
