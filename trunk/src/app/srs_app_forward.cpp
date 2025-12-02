@@ -123,23 +123,10 @@ srs_error_t SrsForwarder::on_meta_data(SrsMediaPacket *shared_metadata)
 {
     srs_error_t err = srs_success;
 
-    // Skip metadata for external services like Amazon IVS
-    // Some services may not handle SRS-specific metadata fields properly
-    // TODO: Make this configurable
+    // Skip metadata for external forwarding to services like Amazon IVS, YouTube, Twitch, etc.
+    // SRS adds custom fields (server, server_version) to metadata which some services reject.
+    // The essential stream information (codec, resolution, etc.) is already in the sequence headers.
     srs_trace("Forwarder: Skipping metadata for external service compatibility");
-    return err;
-
-    SrsMediaPacket *metadata = shared_metadata->copy();
-
-    // Use ZERO jitter algorithm to ensure timestamps start from 0 for external services
-    if ((err = jitter_->correct(metadata, SrsRtmpJitterAlgorithmZERO)) != srs_success) {
-        return srs_error_wrap(err, "jitter");
-    }
-
-    if ((err = queue_->enqueue(metadata)) != srs_success) {
-        return srs_error_wrap(err, "enqueue metadata");
-    }
-
     return err;
 }
 
