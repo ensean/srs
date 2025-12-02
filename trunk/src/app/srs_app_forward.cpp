@@ -125,8 +125,8 @@ srs_error_t SrsForwarder::on_meta_data(SrsMediaPacket *shared_metadata)
 
     SrsMediaPacket *metadata = shared_metadata->copy();
 
-    // TODO: FIXME: config the jitter of Forwarder.
-    if ((err = jitter_->correct(metadata, SrsRtmpJitterAlgorithmOFF)) != srs_success) {
+    // Use ZERO jitter algorithm to ensure timestamps start from 0 for external services
+    if ((err = jitter_->correct(metadata, SrsRtmpJitterAlgorithmZERO)) != srs_success) {
         return srs_error_wrap(err, "jitter");
     }
 
@@ -143,8 +143,8 @@ srs_error_t SrsForwarder::on_audio(SrsMediaPacket *shared_audio)
 
     SrsMediaPacket *msg = shared_audio->copy();
 
-    // TODO: FIXME: config the jitter of Forwarder.
-    if ((err = jitter_->correct(msg, SrsRtmpJitterAlgorithmOFF)) != srs_success) {
+    // Use ZERO jitter algorithm to ensure timestamps start from 0 for external services
+    if ((err = jitter_->correct(msg, SrsRtmpJitterAlgorithmZERO)) != srs_success) {
         return srs_error_wrap(err, "jitter");
     }
 
@@ -166,8 +166,8 @@ srs_error_t SrsForwarder::on_video(SrsMediaPacket *shared_video)
 
     SrsMediaPacket *msg = shared_video->copy();
 
-    // TODO: FIXME: config the jitter of Forwarder.
-    if ((err = jitter_->correct(msg, SrsRtmpJitterAlgorithmOFF)) != srs_success) {
+    // Use ZERO jitter algorithm to ensure timestamps start from 0 for external services
+    if ((err = jitter_->correct(msg, SrsRtmpJitterAlgorithmZERO)) != srs_success) {
         return srs_error_wrap(err, "jitter");
     }
 
@@ -299,24 +299,30 @@ srs_error_t SrsForwarder::forward()
     SrsMessageArray msgs(SYS_MAX_FORWARD_SEND_MSGS);
 
     // update sequence header
-    // TODO: FIXME: maybe need to zero the sequence header timestamp.
-    srs_trace("Forwarder: Sending sequence headers, video_sh=%s(%d bytes), audio_sh=%s(%d bytes)",
-              sh_video_ ? "yes" : "no", sh_video_ ? sh_video_->size() : 0,
-              sh_audio_ ? "yes" : "no", sh_audio_ ? sh_audio_->size() : 0);
+    // Reset timestamp to 0 for sequence headers to ensure compatibility with external services
+    srs_trace("Forwarder: Sending sequence headers, video_sh=%s(%d bytes, ts=%d), audio_sh=%s(%d bytes, ts=%d)",
+              sh_video_ ? "yes" : "no", sh_video_ ? sh_video_->size() : 0, sh_video_ ? (int)sh_video_->timestamp_ : 0,
+              sh_audio_ ? "yes" : "no", sh_audio_ ? sh_audio_->size() : 0, sh_audio_ ? (int)sh_audio_->timestamp_ : 0);
     
     if (sh_video_) {
-        if ((err = sdk_->send_and_free_message(sh_video_->copy())) != srs_success) {
+        SrsMediaPacket* video_copy = sh_video_->copy();
+        video_copy->timestamp_ = 0;  // Reset timestamp for external services
+        if ((err = sdk_->send_and_free_message(video_copy)) != srs_success) {
             return srs_error_wrap(err, "send video sh");
         }
         srs_trace("Forwarder: Video sequence header sent successfully");
     }
     if (sh_audio_) {
-        if ((err = sdk_->send_and_free_message(sh_audio_->copy())) != srs_success) {
+        SrsMediaPacket* audio_copy = sh_audio_->copy();
+        audio_copy->timestamp_ = 0;  // Reset timestamp for external services
+        if ((err = sdk_->send_and_free_message(audio_copy)) != srs_success) {
             return srs_error_wrap(err, "send audio sh");
         }
         srs_trace("Forwarder: Audio sequence header sent successfully");
     }
 
+    int total_msgs_sent = 0;
+    
     while (true) {
         if ((err = trd_->pull()) != srs_success) {
             return srs_error_wrap(err, "thread quit");
@@ -330,6 +336,7 @@ srs_error_t SrsForwarder::forward()
             err = sdk_->recv_message(&msg);
 
             if (err != srs_success && srs_error_code(err) != ERROR_SOCKET_TIMEOUT) {
+                srs_warn("Forwarder: Connection lost after sending %d messages", total_msgs_sent);
                 return srs_error_wrap(err, "receive control message");
             }
             srs_freep(err);
@@ -354,6 +361,8 @@ srs_error_t SrsForwarder::forward()
             continue;
         }
 
+        total_msgs_sent += count;
+        
         // sendout messages, all messages are freed by send_and_free_messages().
         if ((err = sdk_->send_and_free_messages(msgs.msgs_, count)) != srs_success) {
             return srs_error_wrap(err, "send messages");
