@@ -264,12 +264,15 @@ srs_error_t SrsForwarder::do_cycle()
         return srs_error_wrap(err, "sdk connect url=%s, cto=%dms, sto=%dms.", url.c_str(), srsu2msi(cto), srsu2msi(sto));
     }
 
-    // For RTMP client, we pass the vhost in tcUrl when connecting,
-    // so we publish without vhost in stream.
+    // For external services like Amazon IVS, we need to publish with the exact stream name
+    // without any vhost parameter. Use a conservative chunk size (4096) for compatibility.
     string stream;
-    if ((err = sdk_->publish(config_->get_chunk_size(req_->vhost_), false, &stream)) != srs_success) {
+    int chunk_size = 4096;  // Use standard chunk size for external services
+    if ((err = sdk_->publish(chunk_size, false, &stream)) != srs_success) {
         return srs_error_wrap(err, "sdk publish");
     }
+    
+    srs_trace("Forwarder: Published successfully, actual_stream=%s, chunk_size=%d", stream.c_str(), chunk_size);
 
     if ((err = hub_->on_forwarder_start(this)) != srs_success) {
         return srs_error_wrap(err, "notify hub start");
@@ -297,15 +300,21 @@ srs_error_t SrsForwarder::forward()
 
     // update sequence header
     // TODO: FIXME: maybe need to zero the sequence header timestamp.
+    srs_trace("Forwarder: Sending sequence headers, video_sh=%s(%d bytes), audio_sh=%s(%d bytes)",
+              sh_video_ ? "yes" : "no", sh_video_ ? sh_video_->size() : 0,
+              sh_audio_ ? "yes" : "no", sh_audio_ ? sh_audio_->size() : 0);
+    
     if (sh_video_) {
         if ((err = sdk_->send_and_free_message(sh_video_->copy())) != srs_success) {
             return srs_error_wrap(err, "send video sh");
         }
+        srs_trace("Forwarder: Video sequence header sent successfully");
     }
     if (sh_audio_) {
         if ((err = sdk_->send_and_free_message(sh_audio_->copy())) != srs_success) {
             return srs_error_wrap(err, "send audio sh");
         }
+        srs_trace("Forwarder: Audio sequence header sent successfully");
     }
 
     while (true) {
