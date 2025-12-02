@@ -123,6 +123,12 @@ srs_error_t SrsForwarder::on_meta_data(SrsMediaPacket *shared_metadata)
 {
     srs_error_t err = srs_success;
 
+    // Skip metadata for external services like Amazon IVS
+    // Some services may not handle SRS-specific metadata fields properly
+    // TODO: Make this configurable
+    srs_trace("Forwarder: Skipping metadata for external service compatibility");
+    return err;
+
     SrsMediaPacket *metadata = shared_metadata->copy();
 
     // Use ZERO jitter algorithm to ensure timestamps start from 0 for external services
@@ -265,9 +271,9 @@ srs_error_t SrsForwarder::do_cycle()
     }
 
     // For external services like Amazon IVS, we need to publish with the exact stream name
-    // without any vhost parameter. Use a conservative chunk size (4096) for compatibility.
+    // without any vhost parameter. Use default chunk size (128) for maximum compatibility.
     string stream;
-    int chunk_size = 4096;  // Use standard chunk size for external services
+    int chunk_size = SRS_CONSTS_RTMP_PROTOCOL_CHUNK_SIZE;  // Use default 128 for external services
     if ((err = sdk_->publish(chunk_size, false, &stream)) != srs_success) {
         return srs_error_wrap(err, "sdk publish");
     }
