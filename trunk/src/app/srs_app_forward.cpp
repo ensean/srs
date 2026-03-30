@@ -123,17 +123,10 @@ srs_error_t SrsForwarder::on_meta_data(SrsMediaPacket *shared_metadata)
 {
     srs_error_t err = srs_success;
 
-    SrsMediaPacket *metadata = shared_metadata->copy();
-
-    // TODO: FIXME: config the jitter of Forwarder.
-    if ((err = jitter_->correct(metadata, SrsRtmpJitterAlgorithmOFF)) != srs_success) {
-        return srs_error_wrap(err, "jitter");
-    }
-
-    if ((err = queue_->enqueue(metadata)) != srs_success) {
-        return srs_error_wrap(err, "enqueue metadata");
-    }
-
+    // Skip metadata for external forwarding to services like Amazon IVS, YouTube, Twitch, etc.
+    // SRS adds custom fields (server, server_version) to metadata which some services reject.
+    // The essential stream information (codec, resolution, etc.) is already in the sequence headers.
+    srs_trace("Forwarder: Skipping metadata for external service compatibility");
     return err;
 }
 
@@ -143,8 +136,8 @@ srs_error_t SrsForwarder::on_audio(SrsMediaPacket *shared_audio)
 
     SrsMediaPacket *msg = shared_audio->copy();
 
-    // TODO: FIXME: config the jitter of Forwarder.
-    if ((err = jitter_->correct(msg, SrsRtmpJitterAlgorithmOFF)) != srs_success) {
+    // Use ZERO jitter algorithm to ensure timestamps start from 0 for external services
+    if ((err = jitter_->correct(msg, SrsRtmpJitterAlgorithmZERO)) != srs_success) {
         return srs_error_wrap(err, "jitter");
     }
 
@@ -166,8 +159,8 @@ srs_error_t SrsForwarder::on_video(SrsMediaPacket *shared_video)
 
     SrsMediaPacket *msg = shared_video->copy();
 
-    // TODO: FIXME: config the jitter of Forwarder.
-    if ((err = jitter_->correct(msg, SrsRtmpJitterAlgorithmOFF)) != srs_success) {
+    // Use ZERO jitter algorithm to ensure timestamps start from 0 for external services
+    if ((err = jitter_->correct(msg, SrsRtmpJitterAlgorithmZERO)) != srs_success) {
         return srs_error_wrap(err, "jitter");
     }
 
@@ -229,9 +222,31 @@ srs_error_t SrsForwarder::do_cycle()
         // parse host:port from hostport.
         srs_net_split_hostport(ep_forward_, server, port);
 
-        // generate url
-        url = srs_net_url_encode_rtmp_url(server, port, req_->host_, req_->vhost_, req_->app_, req_->stream_, req_->param_);
+        // Generate clean RTMP URL for forwarding.
+        // For external services like Amazon IVS, YouTube, Twitch, etc.,
+        // we should NOT append vhost parameter as they don't understand it.
+        // Format: rtmp://server:port/app/stream
+        std::stringstream ss;
+        ss << "rtmp://" << server << ":" << port << "/" << req_->app_ << "/" << req_->stream_;
+        
+        // Only append original params if they exist and don't contain vhost
+        // (vhost is SRS-specific and external services don't understand it)
+        if (!req_->param_.empty()) {
+            std::string param = req_->param_;
+            // Remove vhost from params for external forwarding
+            size_t vhost_pos = param.find("vhost=");
+            if (vhost_pos == std::string::npos) {
+                // No vhost in param, safe to append
+                if (param[0] != '?' && param[0] != '&') {
+                    ss << "?";
+                }
+                ss << param;
+            }
+        }
+        url = ss.str();
     }
+
+    srs_trace("Forwarder: Connecting to %s, app=%s, stream=%s", url.c_str(), req_->app_.c_str(), req_->stream_.c_str());
 
     srs_freep(sdk_);
     srs_utime_t cto = SRS_FORWARDER_CIMS;
@@ -242,12 +257,15 @@ srs_error_t SrsForwarder::do_cycle()
         return srs_error_wrap(err, "sdk connect url=%s, cto=%dms, sto=%dms.", url.c_str(), srsu2msi(cto), srsu2msi(sto));
     }
 
-    // For RTMP client, we pass the vhost in tcUrl when connecting,
-    // so we publish without vhost in stream.
+    // For external services like Amazon IVS, we need to publish with the exact stream name
+    // without any vhost parameter. Use default chunk size (128) for maximum compatibility.
     string stream;
-    if ((err = sdk_->publish(config_->get_chunk_size(req_->vhost_), false, &stream)) != srs_success) {
+    int chunk_size = SRS_CONSTS_RTMP_PROTOCOL_CHUNK_SIZE;  // Use default 128 for external services
+    if ((err = sdk_->publish(chunk_size, false, &stream)) != srs_success) {
         return srs_error_wrap(err, "sdk publish");
     }
+    
+    srs_trace("Forwarder: Published successfully, actual_stream=%s, chunk_size=%d", stream.c_str(), chunk_size);
 
     if ((err = hub_->on_forwarder_start(this)) != srs_success) {
         return srs_error_wrap(err, "notify hub start");
@@ -274,18 +292,30 @@ srs_error_t SrsForwarder::forward()
     SrsMessageArray msgs(SYS_MAX_FORWARD_SEND_MSGS);
 
     // update sequence header
-    // TODO: FIXME: maybe need to zero the sequence header timestamp.
+    // Reset timestamp to 0 for sequence headers to ensure compatibility with external services
+    srs_trace("Forwarder: Sending sequence headers, video_sh=%s(%d bytes, ts=%d), audio_sh=%s(%d bytes, ts=%d)",
+              sh_video_ ? "yes" : "no", sh_video_ ? sh_video_->size() : 0, sh_video_ ? (int)sh_video_->timestamp_ : 0,
+              sh_audio_ ? "yes" : "no", sh_audio_ ? sh_audio_->size() : 0, sh_audio_ ? (int)sh_audio_->timestamp_ : 0);
+    
     if (sh_video_) {
-        if ((err = sdk_->send_and_free_message(sh_video_->copy())) != srs_success) {
+        SrsMediaPacket* video_copy = sh_video_->copy();
+        video_copy->timestamp_ = 0;  // Reset timestamp for external services
+        if ((err = sdk_->send_and_free_message(video_copy)) != srs_success) {
             return srs_error_wrap(err, "send video sh");
         }
+        srs_trace("Forwarder: Video sequence header sent successfully");
     }
     if (sh_audio_) {
-        if ((err = sdk_->send_and_free_message(sh_audio_->copy())) != srs_success) {
+        SrsMediaPacket* audio_copy = sh_audio_->copy();
+        audio_copy->timestamp_ = 0;  // Reset timestamp for external services
+        if ((err = sdk_->send_and_free_message(audio_copy)) != srs_success) {
             return srs_error_wrap(err, "send audio sh");
         }
+        srs_trace("Forwarder: Audio sequence header sent successfully");
     }
 
+    int total_msgs_sent = 0;
+    
     while (true) {
         if ((err = trd_->pull()) != srs_success) {
             return srs_error_wrap(err, "thread quit");
@@ -299,6 +329,7 @@ srs_error_t SrsForwarder::forward()
             err = sdk_->recv_message(&msg);
 
             if (err != srs_success && srs_error_code(err) != ERROR_SOCKET_TIMEOUT) {
+                srs_warn("Forwarder: Connection lost after sending %d messages", total_msgs_sent);
                 return srs_error_wrap(err, "receive control message");
             }
             srs_freep(err);
@@ -323,6 +354,8 @@ srs_error_t SrsForwarder::forward()
             continue;
         }
 
+        total_msgs_sent += count;
+        
         // sendout messages, all messages are freed by send_and_free_messages().
         if ((err = sdk_->send_and_free_messages(msgs.msgs_, count)) != srs_success) {
             return srs_error_wrap(err, "send messages");
